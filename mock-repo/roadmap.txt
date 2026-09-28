@@ -1,0 +1,19 @@
+Auth                  ✅
+Restaurant            ✅
+Menu                  ⏳ ← NEXT
+Inventory             ⏳
+Customer/Address      ⏳
+Coupon                ⏳
+Order                 ⏳
+Payment               ⏳
+Delivery              ⏳
+Review                ⏳
+Order History         ⏳
+Integration Tests     ⏳
+Production Hardening  ⏳
+        ↓
+AI Code Intelligence  ⏳
+AI Bug Detection      ⏳
+Multi-file Repair     ⏳
+Self-Healing          ⏳
+GitHub PR             ✅ prototype

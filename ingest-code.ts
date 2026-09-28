@@ -23,7 +23,7 @@ async function processAndIngestCodebase() {
 
       console.log(`📄 [Ingestion Engine]: Processing file contents: ${file}`);
       console.log(`🧠 [Ingestion Engine]: Requesting vector from new Gemini Embedding API...`);
-      
+
       // ✅ FIXED: Switched to the modern 'gemini-embedding-001' and explicitly set dimensionality to 768
       const embeddingResponse = await ai.models.embedContent({
         model: 'gemini-embedding-001',
@@ -33,11 +33,14 @@ async function processAndIngestCodebase() {
         }
       });
 
-      // Handle structural output changes in the latest SDK
-      const embeddingsArray = embeddingResponse.embeddings || (embeddingResponse.embedding ? [embeddingResponse.embedding] : []);
-      const vectorValues = embeddingsArray[0]?.values;
+      const vectorValues = embeddingResponse.embeddings?.[0]?.values;
 
-      if (!vectorValues) throw new Error(`Failed to generate embeddings vector for file ${file}`);
+      if (!vectorValues || vectorValues.length !== 768) {
+        throw new Error(
+          `Failed to generate 768-dimensional embedding vector for file ${file}. Got ${vectorValues?.length ?? 0
+          } dimensions.`
+        );
+      }
 
       console.log(`🌲 [Pinecone Cloud]: Seeding mathematical tracking vectors...`);
 
@@ -53,6 +56,7 @@ async function processAndIngestCodebase() {
           }
         ]
       });
+
 
       console.log(`✅ [Ingestion Engine]: Successfully indexed: ${file}`);
     }

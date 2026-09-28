@@ -21,9 +21,9 @@ export class AuthService {
 
     console.log(`[Auth]: Logging in user: ${user.name}`);
     
-    // FIX: Declare and assign a value to the sessionToken variable.
-    // For a real application, this would involve generating a cryptographically secure token.
-    const sessionToken = `mock-session-token-${user.id}-${Date.now()}`;
+    // FIX: Declare and initialize the 'sessionToken' variable before using it.
+    // For a mock, we generate a simple token string.
+    const sessionToken = `mock-token-${user.id}-${Date.now()}`;
 
     return {
       success: true,
