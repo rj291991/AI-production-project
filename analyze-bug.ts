@@ -1,110 +1,285 @@
-import { Pinecone, RecordMetadata } from '@pinecone-database/pinecone';
-import { GoogleGenAI } from '@google/genai';
+import {
+    Pinecone,
+    RecordMetadata,
+} from '@pinecone-database/pinecone';
+
+import {
+    GoogleGenAI,
+    FunctionCallingConfigMode,
+    type Tool,
+} from '@google/genai';
+
 import dotenv from 'dotenv';
 
 import { DATABASE_SCHEMA } from './db-schema';
 
+import {
+    listFiles,
+    readFile,
+    searchCode,
+} from './codebase-tools';
+
 dotenv.config();
 
+// ==================================================
+// CLIENT INITIALIZATION
+// ==================================================
+
+const pineconeApiKey =
+    process.env.PINECONE_API_KEY;
+
+const geminiApiKey =
+    process.env.GEMINI_API_KEY;
+
+if (!pineconeApiKey) {
+    throw new Error(
+        'PINECONE_API_KEY is missing from environment variables.'
+    );
+}
+
+if (!geminiApiKey) {
+    throw new Error(
+        'GEMINI_API_KEY is missing from environment variables.'
+    );
+}
+
 const pc = new Pinecone({
-    apiKey: process.env.PINECONE_API_KEY || ''
+    apiKey: pineconeApiKey,
 });
 
 const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY
+    apiKey: geminiApiKey,
 });
 
-const index = pc.index<RecordMetadata>('agentic-sprint');
+const index =
+    pc.index<RecordMetadata>('agentic-sprint');
 
-async function analyzeBug(bugReport: string) {
+// ==================================================
+// AI TOOLS
+// ==================================================
+
+const tools: Tool[] = [
+    {
+        functionDeclarations: [
+            {
+                name: 'listFiles',
+                description:
+                    'List source files available in the repository. Protected files and directories are excluded.',
+                parameters: {
+                    type: 'OBJECT',
+                    properties: {},
+                },
+            },
+
+            {
+                name: 'readFile',
+
+                description:
+                    'Read the contents of a source file from the repository. Use this when exact code context is required.',
+                parameters: {
+                    type: 'OBJECT',
+                    properties: {
+                        relativePath: {
+                            type: 'STRING',
+                            description:
+                                'Repository-relative file path.',
+                        },
+                    },
+                    required: [
+                        'relativePath',
+                    ],
+                },
+            },
+            {
+                name: 'searchCode',
+                description:
+                    'Search exact text across the source code. Use this to find functions, SQL fragments, imports, callers, parameters, and usages.',
+                parameters: {
+                    type: 'OBJECT',
+                    properties: {
+                        query: {
+                            type: 'STRING',
+                            description:
+                                'Text to search for in the repository.',
+                        },
+                    },
+                    required: [
+                        'query',
+                    ],
+                },
+            },
+        ],
+    },
+];
+
+// ==================================================
+// TOOL EXECUTION
+// ==================================================
+
+async function executeTool(
+    name: string,
+    args: Record<string, unknown>
+): Promise<unknown> {
+
+    switch (name) {
+
+        case 'listFiles':
+            return listFiles();
+
+        case 'readFile':
+            return readFile(
+                String(
+                    args.relativePath ?? ''
+                )
+            );
+
+        case 'searchCode':
+            return searchCode(
+                String(
+                    args.query ?? ''
+                )
+            );
+
+        default:
+            throw new Error(
+                `Unknown tool requested: ${name}`
+            );
+    }
+}
+
+// ==================================================
+// BUG ANALYSIS
+// ==================================================
+
+async function analyzeBug(
+    bugReport: string
+) {
+
     try {
-        console.log(`🐛 Bug Report: ${bugReport}`);
 
-        // --------------------------------------------------
-        // 1. Generate embedding for bug report
-        // --------------------------------------------------
+        console.log(
+            `\n🐛 Bug Report: ${bugReport}\n`
+        );
 
-        console.log('🧠 Generating bug embedding...');
+        // ==================================================
+        // 1. GENERATE BUG EMBEDDING
+        // ==================================================
 
-        const embeddingResponse = await ai.models.embedContent({
-            model: 'gemini-embedding-001',
-            contents: bugReport,
-            config: {
-                outputDimensionality: 768
-            }
-        });
+        console.log(
+            '🧠 Generating bug embedding...'
+        );
+
+        const embeddingResponse =
+            await ai.models.embedContent({
+
+                model:
+                    'gemini-embedding-001',
+
+                contents:
+                    bugReport,
+
+                config: {
+                    outputDimensionality: 768,
+                },
+            });
 
         const bugEmbedding =
-            embeddingResponse.embeddings?.[0]?.values;
+            embeddingResponse
+                .embeddings?.[0]
+                ?.values;
 
-        if (!bugEmbedding || bugEmbedding.length !== 768) {
+        if (
+            !bugEmbedding ||
+            bugEmbedding.length !== 768
+        ) {
+
             throw new Error(
-                `Failed to generate bug embedding. Got ${
-                    bugEmbedding?.length ?? 0
+                `Failed to generate bug embedding. Got ${bugEmbedding?.length ?? 0
                 } dimensions.`
             );
         }
 
-        // --------------------------------------------------
-        // 2. Search relevant code from Pinecone
-        // --------------------------------------------------
+        console.log(
+            `✅ Bug embedding generated: ${bugEmbedding.length} dimensions`
+        );
 
-        console.log('🌲 Searching codebase...');
+        // ==================================================
+        // 2. PINECONE SEARCH
+        // ==================================================
 
-        const searchResults = await index.query({
-            vector: bugEmbedding,
-            topK: 15,
-            includeMetadata: true
-        });
+        console.log(
+            '🌲 Searching codebase...'
+        );
 
-        const matches = searchResults.matches ?? [];
+        const searchResults =
+            await index.query({
 
-        if (matches.length === 0) {
-            throw new Error(
-                'No relevant code found in Pinecone.'
-            );
-        }
+                vector:
+                    bugEmbedding,
 
-        // --------------------------------------------------
-        // 3. Build relevant code context
-        // --------------------------------------------------
+                topK: 15,
 
-        const relevantCode = matches
-            .map((match, index) => {
-                const metadata = match.metadata;
+                includeMetadata:
+                    true,
+            });
 
-                const filePath =
-                    metadata?.filePath ?? 'Unknown file';
+        const matches =
+            searchResults.matches ??
+            [];
 
-                const codeSnippet =
-                    metadata?.codeSnippet ?? 'No code available';
+        console.log(
+            `📌 Pinecone returned ${matches.length} matches`
+        );
 
-                const score =
-                    match.score?.toFixed(6) ?? 'N/A';
+        const relevantCode =
+            matches
+                .map(
+                    (
+                        match,
+                        matchIndex
+                    ) => {
 
-                return `
-#${index + 1}
-FILE: ${filePath}
-SCORE: ${score}
+                        const metadata =
+                            match.metadata;
+
+                        return `
+#${matchIndex + 1}
+
+FILE:
+${metadata?.filePath ??
+                            'Unknown file'
+                            }
+
+SCORE:
+${match.score?.toFixed(6) ??
+                            'N/A'
+                            }
 
 CODE:
-${codeSnippet}
+${metadata?.codeSnippet ??
+                            'No code available'
+                            }
 `;
-            })
-            .join('\n-----------------------------\n');
+                    }
+                )
+                .join(
+                    '\n-----------------------------\n'
+                );
 
-        // --------------------------------------------------
-        // 4. Build Gemini RCA prompt
-        // --------------------------------------------------
+        // ==================================================
+        // 3. AGENT PROMPT
+        // ==================================================
 
-        console.log('🤖 Asking Gemini to analyze the bug...');
+        const prompt = `You are a senior production software engineer performing
+evidence-driven Root Cause Analysis (RCA).
 
-        const prompt = `
-You are a senior software engineer performing
-Root Cause Analysis (RCA) on a production backend codebase.
+You have READ-ONLY access to the repository through tools.
 
-Your job is to identify the most likely root cause of
-the reported bug using ONLY the evidence provided below.
+Your job is NOT to guess the most plausible explanation.
+
+Your job is to INVESTIGATE the reported bug, identify
+candidate causes, verify them using repository evidence,
+and only then determine the root cause.
 
 ==================================================
 BUG REPORT
@@ -119,127 +294,745 @@ DATABASE SCHEMA
 ${DATABASE_SCHEMA}
 
 ==================================================
-RELEVANT CODE RETRIEVED FROM CODEBASE
+SEMANTICALLY RETRIEVED CODE
 ==================================================
 
 ${relevantCode}
 
 ==================================================
-ANALYSIS RULES
+CORE INVESTIGATION PRINCIPLE
 ==================================================
 
-1. Use BOTH the application code and database schema.
+Pinecone results are ONLY hints.
 
-2. Do NOT invent database schema definitions.
+Pinecone does NOT represent the complete repository
+and must NEVER be treated as proof.
 
-3. If the provided schema says a column has a DEFAULT,
-   do not claim that the column is missing a default.
+Repository tools are the source of truth:
 
-4. Clearly distinguish:
-   - Confirmed evidence
-   - Assumptions
-   - Possible causes
+- listFiles
+- searchCode
+- readFile
 
-5. Do not call an assumption a confirmed root cause.
+If important information is missing from Pinecone results,
+use repository tools to obtain it.
 
-6. If the available evidence is insufficient to determine
-   the root cause, explicitly say that the root cause
-   cannot be confirmed.
-
-7. Pay attention to:
-   - SQL queries
-   - database constraints
-   - foreign keys
-   - validation
-   - service logic
-   - controller logic
-   - route configuration
-   - relationships between tables
-
-8. Check whether the retrieved code actually contains
-   the code responsible for the reported bug.
-
-9. If the code and schema are consistent, say so instead
-   of inventing a mismatch.
-
-10. Prefer a specific evidence-backed explanation over
-    generic possibilities.
+Do NOT guess when the repository can be inspected.
 
 ==================================================
-OUTPUT FORMAT
+INVESTIGATION WORKFLOW
 ==================================================
 
-Provide the analysis using exactly these sections:
+Follow this investigation process:
+
+PHASE 1 — LOCATE
+
+1. Identify the feature/module related to the bug.
+2. Locate the relevant entry point.
+3. Find the important functions, classes, queries,
+   services, repositories, and dependencies.
+
+PHASE 2 — TRACE EXECUTION
+
+Trace the actual execution path from the entry point.
+
+For example:
+
+controller
+  -> service
+  -> repository
+  -> database
+
+Where applicable, also inspect:
+
+request
+  -> validation
+  -> transformation
+  -> business logic
+  -> database
+  -> response/error handling
+
+Do not stop after finding one suspicious function.
+
+PHASE 3 — IDENTIFY CANDIDATE CAUSES
+
+Look for concrete defects such as:
+
+- incorrect arguments
+- incorrect parameter ordering
+- missing parameters
+- wrong return values
+- incorrect conditions
+- missing validation
+- incorrect validation
+- incorrect data transformation
+- SQL mistakes
+- schema mismatches
+- incorrect function calls
+- incorrect imports
+- incorrect error handling
+- incorrect assumptions between layers
+- caller/callee contract mismatches
+
+Do not treat normal-looking code as evidence of failure.
+
+PHASE 4 — FORM HYPOTHESES
+
+When suspicious behavior is found, treat it as a
+HYPOTHESIS first.
+
+Do NOT immediately call it the root cause.
+
+For every important hypothesis, determine:
+
+1. What exactly is suspected?
+2. Why could it cause the reported bug?
+3. What evidence would prove it?
+4. Which repository tools can obtain that evidence?
+5. Is there evidence that contradicts the hypothesis?
+
+PHASE 5 — VERIFY
+
+Use repository tools to verify the hypothesis.
+
+Inspect:
+
+- callers
+- function arguments
+- function signatures
+- dependent functions
+- validation
+- data transformations
+- SQL
+- schema
+- error handling
+- related configuration
+- relevant usages
+
+Search for actual callers/usages when necessary.
+
+If you find a suspicious function, inspect how it is
+called before confirming it as the root cause.
+
+PHASE 6 — CHECK COMPETING CAUSES
+
+If multiple causes are possible:
+
+1. Investigate each important candidate.
+2. Collect evidence for each.
+3. Eliminate candidates that contradict the code.
+4. Keep unsupported candidates as POSSIBLE or UNKNOWN.
+
+Do not select a root cause merely because it sounds plausible.
+
+PHASE 7 — FINAL VERIFICATION
+
+Before producing the final RCA, ask:
+
+- Did I actually locate the defect?
+- Did I verify the relevant execution path?
+- Did I inspect the callers and arguments?
+- Did I inspect the database interaction if relevant?
+- Did I inspect the schema if relevant?
+- Did I verify the suspected failure mechanism?
+- Is any critical fact still an assumption?
+- Is there contradictory evidence?
+- Could another investigated cause explain the bug?
+
+If critical evidence is missing, do NOT mark the root cause
+as CONFIRMED.
+
+==================================================
+CONFIDENCE DEFINITIONS
+==================================================
+
+CONFIRMED
+
+Use CONFIRMED ONLY when:
+
+- the defect is directly visible in the source code/schema,
+- the failure mechanism is established,
+- the relevant execution path has been verified,
+- and no critical assumption is required.
+
+A missing runtime error, actual input, caller behavior,
+or other critical fact means CONFIRMED may not be justified.
+
+LIKELY
+
+Use LIKELY when:
+
+- strong source-code evidence supports the hypothesis,
+- the suspected defect is credible,
+- but one important piece of evidence needed for full
+  confirmation is unavailable.
+
+POSSIBLE
+
+Use POSSIBLE when:
+
+- the code allows the reported failure,
+- but evidence is weak,
+- or multiple competing explanations remain.
+
+UNKNOWN
+
+Use UNKNOWN when:
+
+- there is not enough evidence to identify a credible
+  root cause.
+
+UNKNOWN is an acceptable and correct result.
+
+Never upgrade UNKNOWN or POSSIBLE to CONFIRMED just to
+produce a more decisive answer.
+
+==================================================
+CRITICAL RULE: NEVER CONVERT ASSUMPTIONS INTO FACTS
+==================================================
+
+If you observe:
+
+"opening_time is PostgreSQL TIME"
+
+and:
+
+"openingTime is passed as a string"
+
+you may say:
+
+"There is a potential type/format validation issue."
+
+You may NOT say:
+
+"Invalid time input is the confirmed root cause."
+
+unless the evidence demonstrates that the actual failure
+is caused by the invalid time input.
+
+For example, evidence such as:
+
+- actual invalid input
+- database error
+- stack trace
+- verified failing execution path
+
+may be required.
+
+Clearly distinguish:
+
+OBSERVED FACT
+vs
+INFERENCE
+vs
+ASSUMPTION
+
+==================================================
+SQL INVESTIGATION RULES
+==================================================
+
+For SQL-related bugs explicitly inspect:
+
+1. INSERT/UPDATE/DELETE statement
+2. Column count
+3. VALUES count
+4. Parameter numbers
+5. Function arguments
+6. SQL parameter arrays
+7. Parameter ordering
+8. RETURNING clause
+9. Table schema
+10. Foreign keys
+11. NOT NULL constraints
+12. Relevant unique constraints
+
+Example:
+
+Columns:
+
+a, b, c, d, e, f
+
+Values:
+
+$1, $2, $3, $4, $5, $7
+
+This is a concrete SQL defect.
+
+But still verify that this query belongs to the
+reported failing execution path.
+
+==================================================
+VALIDATION RULES
+==================================================
+
+Do not assume:
+
+"Validation exists"
+
+means:
+
+"Validation is causing the bug."
+
+Do not assume:
+
+"Validation is missing"
+
+means:
+
+"Invalid input caused the current failure."
+
+Determine what data actually flows through the code
+and whether the suspected validation behavior explains
+the reported failure.
+
+==================================================
+DATABASE RULES
+==================================================
+
+Do not assume:
+
+"Database access exists"
+
+means:
+
+"Database is the problem."
+
+Inspect the actual query, parameters, schema,
+constraints, and relevant error handling.
+
+==================================================
+TOOL USAGE RULES
+==================================================
+
+Use:
+
+listFiles
+- when repository structure or relevant files are unknown.
+
+searchCode
+- to find functions
+- callers
+- usages
+- imports
+- SQL fragments
+- schema references
+- parameter names
+- error messages
+
+readFile
+- when exact implementation context is required.
+
+Prefer searchCode before guessing file locations.
+
+If a function is important, inspect both:
+
+1. its implementation
+2. its callers/usages
+
+==================================================
+INVESTIGATION COMPLETION CHECKLIST
+==================================================
+
+Before final RCA, verify as many applicable items as possible:
+
+[ ] Relevant entry point identified
+[ ] Relevant implementation inspected
+[ ] Execution path traced
+[ ] Callers inspected
+[ ] Arguments inspected
+[ ] Dependencies inspected
+[ ] Validation inspected
+[ ] Data transformations inspected
+[ ] Database interaction inspected
+[ ] Schema inspected
+[ ] Error handling inspected
+[ ] Candidate causes considered
+[ ] Important hypotheses investigated
+[ ] Contradictory evidence checked
+[ ] Root cause verification attempted
+[ ] Missing evidence documented
+
+Do not stop merely because one suspicious code section
+has been found.
+
+==================================================
+NO FILE MODIFICATION
+==================================================
+
+You are strictly READ-ONLY.
+
+Do NOT modify, create, delete, or rewrite repository files.
+
+==================================================
+CURRENT TASK
+==================================================
+
+Investigate the reported bug now.
+
+Use repository tools as necessary.
+
+Do not produce the final RCA until you have collected
+enough evidence.
+
+Your goal is:
+
+BUG REPORT
+    ↓
+RELEVANT CODE
+    ↓
+EXECUTION FLOW
+    ↓
+CANDIDATE CAUSES
+    ↓
+EVIDENCE
+    ↓
+VERIFICATION
+    ↓
+ROOT CAUSE
+    ↓
+FIX
+    ↓
+TESTS
+
+==================================================
+FINAL RCA FORMAT
+==================================================
 
 ## 1. Root Cause
 
-Explain the most likely root cause.
+Label:
 
-Clearly label whether it is:
+CONFIRMED / LIKELY / POSSIBLE / UNKNOWN
 
-- CONFIRMED
-- LIKELY
-- POSSIBLE
-- UNKNOWN
+State the root cause and explain exactly why the
+selected confidence level is justified.
 
-Explain the evidence supporting the conclusion.
+Do not hide missing evidence.
 
 ## 2. Affected Files
 
-List only files that are actually relevant
-to the reported bug.
-
-For each file explain why it is relevant.
+List only files that are actually relevant to the
+identified cause.
 
 ## 3. Relevant Functions
 
-List the functions involved in the failure path.
+List the functions directly involved.
 
-## 4. Why the Bug Happens
+## 4. Execution Flow
 
-Explain the execution flow step-by-step.
+Explain the actual flow from entry point to failure.
 
-Include the interaction between application code
-and database schema where relevant.
+Example:
 
-## 5. Evidence
+controller
+→ service
+→ repository
+→ database
 
-Separate:
+## 5. Why the Bug Happens
+
+Explain the concrete defect step by step.
+
+Separate verified facts from inference.
+
+## 6. Evidence
 
 ### Confirmed Evidence
-Facts directly visible in the provided code/schema.
+
+Only directly verified facts from repository/schema/tool results.
 
 ### Assumptions
-Things that are not directly confirmed.
+
+Facts that were inferred but not directly verified.
 
 ### Missing Evidence
-Information that would be required to confirm
-the root cause.
 
-## 6. Suggested Fix
+Information required to fully verify the root cause
+but unavailable from the repository.
 
-Suggest fixes only for issues supported by evidence.
+## 7. Alternative Causes Considered
 
-Do not modify working code just because a potential
-problem is theoretically possible.
+List important competing hypotheses and explain whether
+they were:
 
-## 7. Tests
+- eliminated
+- still possible
+- unsupported
 
-Suggest tests that would verify the suspected root cause
-and prevent regression.
+## 8. Suggested Fix
+
+Suggest only fixes supported by the verified evidence.
+
+Do not propose unrelated refactoring.
+
+## 9. Tests
+
+Provide tests that:
+
+1. reproduce the defect
+2. verify the fix
+3. prevent regression
+
+If the root cause is not CONFIRMED, clearly state which
+tests or runtime evidence are needed to confirm it.
 `;
 
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt
-        });
+
+        // ==================================================
+        // 4. CONVERSATION STATE
+        // ==================================================
+
+        const conversation: Array<any> = [
+            {
+                role: 'user',
+
+                parts: [
+                    {
+                        text: prompt,
+                    },
+                ],
+            },
+        ];
+
+        // ==================================================
+        // 5. INITIAL AGENT REQUEST
+        // ==================================================
+
+        let response =
+            await ai.models.generateContent({
+
+                model:
+                    'gemini-2.5-flash',
+
+                contents:
+                    conversation,
+
+                config: {
+
+                    tools,
+
+                    toolConfig: {
+
+                        functionCallingConfig: {
+
+                            mode:
+                                FunctionCallingConfigMode.AUTO,
+                        },
+                    },
+                },
+            });
+
+        // ==================================================
+        // 6. AGENT TOOL LOOP
+        // ==================================================
+
+        const MAX_TOOL_ROUNDS = 10;
+
+        let completedNormally =
+            false;
+
+        for (
+            let round = 0;
+            round < MAX_TOOL_ROUNDS;
+            round++
+        ) {
+
+            const functionCalls =
+                response.functionCalls;
+
+            // ----------------------------------------------
+            // Agent finished
+            // ----------------------------------------------
+
+            if (
+                !functionCalls ||
+                functionCalls.length === 0
+            ) {
+
+                completedNormally =
+                    true;
+
+                break;
+            }
+
+            console.log(
+                `\n🔎 Agent investigation round ${round + 1
+                }/${MAX_TOOL_ROUNDS}`
+            );
+
+            // ----------------------------------------------
+            // Preserve model response
+            // ----------------------------------------------
+
+            const modelContent =
+                response.candidates?.[0]
+                    ?.content;
+
+            if (modelContent) {
+
+                conversation.push(
+                    modelContent
+                );
+            }
+
+            // ----------------------------------------------
+            // Execute tools
+            // ----------------------------------------------
+
+            const toolResponses: any[] =
+                [];
+
+            for (
+                const call of functionCalls
+            ) {
+
+                const toolName =
+                    call.name;
+
+                if (!toolName) {
+
+                    console.error(
+                        '   ❌ Tool call did not contain a name.'
+                    );
+
+                    continue;
+                }
+
+                console.log(
+                    `   🛠️ Tool: ${toolName}`
+                );
+
+                console.log(
+                    `   📥 Args: ${JSON.stringify(
+                        call.args ?? {}
+                    )}`
+                );
+
+                try {
+
+                    const result =
+                        await executeTool(
+                            toolName,
+                            call.args ?? {}
+                        );
+
+                    console.log(
+                        `   ✅ Tool completed: ${toolName}`
+                    );
+
+                    toolResponses.push({
+
+                        functionResponse: {
+
+                            name:
+                                toolName,
+
+                            response: {
+
+                                result,
+                            },
+                        },
+                    });
+
+                } catch (toolError) {
+
+                    const errorMessage =
+                        toolError instanceof Error
+                            ? toolError.message
+                            : String(toolError);
+
+                    console.error(
+                        `   ❌ Tool failed: ${toolName}`
+                    );
+
+                    console.error(
+                        `   ${errorMessage}`
+                    );
+
+                    toolResponses.push({
+
+                        functionResponse: {
+
+                            name:
+                                toolName,
+
+                            response: {
+
+                                error:
+                                    errorMessage,
+                            },
+                        },
+                    });
+                }
+            }
+
+            // ----------------------------------------------
+            // Add tool results to history
+            // ----------------------------------------------
+
+            conversation.push({
+
+                role: 'user',
+
+                parts:
+                    toolResponses,
+            });
+
+            // ----------------------------------------------
+            // Continue investigation
+            // ----------------------------------------------
+
+            response =
+                await ai.models.generateContent({
+
+                    model:
+                        'gemini-2.5-flash',
+
+                    contents:
+                        conversation,
+
+                    config: {
+
+                        tools,
+
+                        toolConfig: {
+
+                            functionCallingConfig: {
+
+                                mode:
+                                    FunctionCallingConfigMode.AUTO,
+                            },
+                        },
+                    },
+                });
+        }
+
+        // ==================================================
+        // 7. MAX ROUND WARNING
+        // ==================================================
+
+        if (!completedNormally) {
+
+            console.warn(
+                `\n⚠️ Agent reached maximum tool rounds (${MAX_TOOL_ROUNDS}).`
+            );
+
+            console.warn(
+                '⚠️ RCA may be incomplete because the investigation limit was reached.'
+            );
+        }
+
+        // ==================================================
+        // 8. FINAL RCA
+        // ==================================================
 
         console.log(
             '\n================ ROOT CAUSE ANALYSIS ================\n'
         );
 
         console.log(
-            response.text ?? 'No analysis generated.'
+            response.text ??
+            'No analysis generated.'
         );
 
         console.log(
@@ -247,25 +1040,48 @@ and prevent regression.
         );
 
     } catch (error) {
+
         console.error(
-            '❌ Bug analysis failed:',
+            '\n❌ Bug analysis failed:'
+        );
+
+        console.error(
             error
         );
     }
 }
 
-const bugReport = process.argv.slice(2).join(' ').trim();
+// ==================================================
+// CLI INPUT
+// ==================================================
+
+const bugReport =
+    process.argv
+        .slice(2)
+        .join(' ')
+        .trim();
 
 if (!bugReport) {
+
     console.error(
         '❌ Please provide a bug report.'
     );
 
     console.error(
-        'Example: npx tsx analyze-bug.ts "Restaurant creation is failing"'
+        'Example:'
+    );
+
+    console.error(
+        'npx tsx analyze-bug.ts "Branch creation is failing"'
     );
 
     process.exit(1);
 }
 
-analyzeBug(bugReport);
+// ==================================================
+// START
+// ==================================================
+
+analyzeBug(
+    bugReport
+);
